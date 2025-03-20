@@ -1,0 +1,134 @@
+---
+title: "Final_Project"
+output: html_document
+date: "2024-04-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(pROC)
+library(gbm) 
+library(rpart)
+library(e1071)
+```
+
+```{r}
+nba_data <- read.csv("NBA_Data.csv")
+nba_data <- nba_data %>% mutate(winner = factor(Winner, levels = c("team.2","team.1")))
+
+middle <- nrow(nba_data)/2
+top_half <- head(nba_data,middle)
+bottom_half <- tail(nba_data,middle) 
+
+test_index <- createDataPartition(top_half$Winner, p = 0.20, list = FALSE)
+test_set <- rbind(top_half[test_index,],bottom_half[test_index,])
+train_set <- rbind(top_half[-test_index,],bottom_half[-test_index,])
+
+nba_data <- nba_data %>% mutate(pts_pg_diff = PTS.PG.1 - PTS.PG.2, win_pct_diff = WIN.PCT.1 - WIN.PCT.2, fta_diff = FTA.1 - FTA.2, fgm_diff = FGM.1 - FGM.2, dreb_pg = DREB.1 - DREB.2, seed_diff = Seed.1 - Seed.2, plusminus_diff = plus_minus.1 - plus_minus.2)
+
+train_set <- nba_data %>% mutate(pts_pg_diff = PTS.PG.1 - PTS.PG.2, win_pct_diff = WIN.PCT.1 - WIN.PCT.2, fta_diff = FTA.1 - FTA.2, fgm_diff = FGM.1 - FGM.2, dreb_pg = DREB.1 - DREB.2, seed_diff = Seed.1 - Seed.2, plusminus_diff = plus_minus.1 - plus_minus.2)
+
+
+test_set <- nba_data %>% mutate(pts_pg_diff = PTS.PG.1 - PTS.PG.2, win_pct_diff = WIN.PCT.1 - WIN.PCT.2, fta_diff = FTA.1 - FTA.2, fgm_diff = FGM.1 - FGM.2, dreb_pg = DREB.1 - DREB.2, seed_diff = Seed.1 - Seed.2, plusminus_diff = plus_minus.1 - plus_minus.2)
+```
+
+## Numerical Exploration
+
+```{r}
+data <- data.frame(nba_data$Winner)
+
+# Calculate the counts
+table_counts <- data %>%
+  count(nba_data$Winner) %>%
+  mutate(total = sum(n))
+
+# Calculate the percentages
+table_percentages <- table_counts %>%
+  mutate(Percentage = (n / total) * 100) |>
+  mutate(mean_win_pct = (mean(nba_data$win_pct_diff))) |>
+  mutate(mean_pts_pg = (mean(nba_data$pts_pg_diff))) |>
+  mutate(mean_fta = (mean(nba_data$fta_diff))) |>
+  mutate(mean_fgm = (mean(nba_data$fgm_diff))) |>
+  mutate(mean_dreb = (mean(nba_data$dreb_pg))) |>
+  mutate(mean_seed = (mean(nba_data$seed_diff))) |>
+  mutate(mean_plusminus = (mean(nba_data$plusminus_diff)))
+table_percentages
+```
+
+## Graphical Exploration
+
+```{r}
+ggplot(data = nba_data) +
+  geom_jitter(aes(x = pts_pg_diff, y = win_pct_diff, color = winner), width = 2, height = 0.05) +
+  ggtitle("Figure 1: Points per Game Difference plotted against Win Percentage Difference")
+
+ggplot(data = nba_data) +
+  geom_jitter(aes(x = fta_diff, y = fgm_diff, color = winner), width = 1, height = 0.05) +
+  ggtitle("Figure 2: The difference in Free Throw Attempts Per Game against the Difference \n in Field Goal Makes")
+
+ggplot(data = nba_data) +
+  geom_jitter(aes(x = dreb_pg, y = seed_diff, color = winner), width = .5, height = 0.5) +
+  ggtitle("Figure 3: The difference in Defensive Rebounds Per Game against the Difference \n in Seed")
+```
+
+## Logistic Regression Model
+
+```{r}
+log.mod <- glm(winner ~ pts_pg_diff + win_pct_diff + fta_diff + fgm_diff + dreb_pg + seed_diff + plusminus_diff, data = train_set, family = "binomial")
+summary(log.mod)
+
+phat.log <- predict(log.mod, newdata = test_set, type = "response")
+yhat.log <- factor(if_else(phat.log < 0.5,"team.2","team.1"),levels = c("team.2","team.1"))
+roc(predictor = phat.log, response = test_set$winner, plot = TRUE)
+confusionMatrix(yhat.log, test_set$winner)
+```
+
+## Boosting Model
+
+```{r}
+# it seems that gbm does not like factors, so converted to {0,1}
+train_class01 <- train_set %>% mutate(Winner = if_else(Winner == "team.1",1,0))
+
+mod.boost.class <-gbm(Winner ~ pts_pg_diff + win_pct_diff + fta_diff + fgm_diff + dreb_pg + seed_diff + plusminus_diff, data=train_class01, 
+                      distribution = "bernoulli",
+                     n.trees=150, 
+                     interaction.depth=4, 
+                     shrinkage= 0.1,
+                     cv.folds = 10)
+
+summary(mod.boost.class)
+best.iter <- gbm.perf(mod.boost.class, plot.it = TRUE)
+
+phat.boost.class <- predict(mod.boost.class, newdata = test_set, n.trees = best.iter, type = "response")
+yhat.boost.class <- factor(if_else(phat.boost.class > 0.5,"team.1","team.2"),levels = c("team.1","team.2"))
+roc(predictor = phat.boost.class, response = test_set$winner, plot = TRUE)
+confusionMatrix(yhat.boost.class,test_set$winner)
+```
+
+## Naive Bayes Model
+
+```{r}
+mod.naive <- naiveBayes(winner~ pts_pg_diff + win_pct_diff + fta_diff + fgm_diff + dreb_pg + seed_diff + plusminus_diff, data = train_set, laplace = 0.5)
+mod.naive
+
+phat.naive <- predict(mod.naive, test_set, type = "raw")
+yhat.naive <- predict(mod.naive, test_set, type = "class")
+
+
+roc(predictor = phat.naive[,1], response = test_set$winner, plot = TRUE)
+confusionMatrix(yhat.naive,test_set$winner)
+```
+
+## Example Game For Each Model
+
+```{r}
+matchup1 <- data.frame(seed_diff = -7, win_pct_diff = -.22, pts_pg_diff = 20.4, fta_diff = 2, fgm_diff = 4, dreb_pg = 3, plusminus_diff = 2)
+outcome_winner1 <- predict(log.mod, newdata = matchup1, type = "response")
+outcome_winner2 <- predict(mod.boost.class, newdata = matchup1, type = "response")
+outcome_winner3 <- predict(mod.naive, newdata = matchup1, type = "class")
+outcome_winner1
+outcome_winner2
+outcome_winner3
+```
